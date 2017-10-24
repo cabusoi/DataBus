@@ -48,6 +48,10 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-cache</artifactId>
 		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-redis</artifactId>
+		</dependency>
 		
 		<!-- https://mvnrepository.com/artifact/commons-jxpath/commons-jxpath -->
 		<dependency>
@@ -68,31 +72,4 @@
 		</plugins>
 	</build>
 
-	<profiles>
-		<profile>
-			<id>redis</id>
-			<dependencies>
-				<dependency>
-					<groupId>org.springframework.boot</groupId>
-					<artifactId>spring-boot-starter-data-redis</artifactId>
-				</dependency>
-			</dependencies>
-		</profile>
-		
-		<profile>
-			<id>guava</id>
-			<activation>
-			<activeByDefault>true</activeByDefault>
-			</activation>
-			<dependencies>
-				<dependency>
-					<groupId>com.google.guava</groupId>
-					<artifactId>guava</artifactId>
-					<version>18.0</version>
-				</dependency>
-			</dependencies>
-		</profile>
-
-	</profiles>
-	
 </project>
