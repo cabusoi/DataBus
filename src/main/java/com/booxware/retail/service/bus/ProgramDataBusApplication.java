@@ -8,13 +8,16 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.TimeUnit;
+
+import javax.annotation.PostConstruct;
 
 import org.apache.commons.jxpath.JXPathContext;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.context.annotation.Bean;
-import org.springframework.data.redis.cache.RedisCacheManager;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.support.collections.DefaultRedisMap;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -37,8 +40,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 2) run microservice:
 
 	java -jar <jar>
+	
+3) execute redis-server	
 
-3) run emitter:
+4) run emitter:
 
 	one off - 
 		curl -H "Content-Type: application/json" -X POST localhost:8080/events -d'{"a":1,"b":2, "c":"d", "e":["f1", "f2", "f3"], "f":{"g":1, "h":"h2"}}'
@@ -51,7 +56,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 			curl -X POST localhost:8080/events/$msg; 
 		done;
 	
-4) run listener:
+5) run listener:
 
 	browser - <host>:<port>/sse.html
 	
@@ -63,8 +68,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 @EnableCaching
 public class ProgramDataBusApplication {
 
-	private static final int HTTP_CONNECTION_TIMEOUT = 1000000;
+	@Value("${http.connection.timeout}")
+	private int httpTimeout;
 
+	@Value("${event.cache.expire}")
+	private int eventTTL;
+	
 	public static void main(String[] args) {
 		SpringApplication.run(ProgramDataBusApplication.class, args);
 	}
@@ -72,23 +81,34 @@ public class ProgramDataBusApplication {
 	@Bean
 	AsyncSupportConfigurer configurer() {
 		AsyncSupportConfigurer configurer = new AsyncSupportConfigurer();
-		configurer.setDefaultTimeout(HTTP_CONNECTION_TIMEOUT);
+		configurer.setDefaultTimeout(httpTimeout);
 		return configurer;
 	}
-	
-	@Bean
-	RedisCacheManager cacheManager(StringRedisTemplate template) {
-		return new RedisCacheManager(template);
-	}
 
-	Map<Object,Object> eventsCache;
+	Map<Object, Object> eventsCache;
 	Map<SseEmitter, String> subscribersAndFilters;
 
 	public ProgramDataBusApplication(StringRedisTemplate template) {
-		this.eventsCache = new DefaultRedisMap<Object,Object> ("events", template);
+		DefaultRedisMap<?,?> map = new DefaultRedisMap<Object, Object>("events", template);
+		this.eventsCache = (Map<Object, Object>) map;
 		this.subscribersAndFilters = new HashMap<>();
 	}
+
+	@PostConstruct
+	public void setup(){
+		((DefaultRedisMap<?,?>)this.eventsCache).expire(eventTTL, TimeUnit.SECONDS);
+	}
 	
+	@PostMapping(path = "/events/{event}")
+	public void publish(@PathVariable("event") String event) throws IOException {
+		sendToSubscribers(event);
+	}
+
+	@PostMapping(path = "/events", consumes = { "application/x-www-form-urlencoded;charset=UTF-8", "application/json" })
+	public void publish(@RequestBody JsonNode event) throws IOException {
+		sendToSubscribers(event);
+	}
+
 	@GetMapping(path = "/events", produces = "text/event-stream")
 	public SseEmitter subscribe(@RequestParam(name = "query", defaultValue = "") String xpath) {
 
@@ -102,33 +122,6 @@ public class ProgramDataBusApplication {
 		emitter.onCompletion(remove);
 		emitter.onTimeout(remove);
 		return emitter;
-	}
-
-	private void filterAndSend(SseEmitter emitter, Collection<?> events, String xpath) {
-		Iterator<?> iterator;
-		if (xpath.isEmpty()) {
-			iterator = events.iterator();
-		} else {
-			JXPathContext context = JXPathContext.newContext(events);
-			iterator = context.iterate(xpath);
-		}
-		iterator.forEachRemaining(event -> {
-			try {
-				emitter.send(SseEmitter.event().data(event));
-			} catch (IOException e) {
-				events.remove(event);
-			}
-		});
-	}
-
-	@PostMapping(path = "/events/{event}")
-	public void publish(@PathVariable("event") String event) throws IOException {
-		sendToSubscribers(event);
-	}
-
-	@PostMapping(path = "/events", consumes = { "application/x-www-form-urlencoded;charset=UTF-8", "application/json" })
-	public void publish(@RequestBody JsonNode event) throws IOException {
-		sendToSubscribers(event);
 	}
 
 	private void sendToSubscribers(Object event) {
@@ -145,5 +138,21 @@ public class ProgramDataBusApplication {
 			}
 		}
 	}
-}
 
+	private void filterAndSend(SseEmitter emitter, Collection<?> events, String xpath) {
+		Iterator<?> iterator;
+		if (xpath.isEmpty()) {
+			iterator = events.iterator();
+		} else {
+			JXPathContext context = JXPathContext.newContext(events);
+			iterator = context.iterate(xpath);
+		}
+		iterator.forEachRemaining(event -> {
+			try {
+				emitter.send(SseEmitter.event().data(event));
+			} catch (IOException e) {
+			}
+		});
+	}
+
+}
