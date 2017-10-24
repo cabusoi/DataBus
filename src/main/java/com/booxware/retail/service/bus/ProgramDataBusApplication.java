@@ -1,23 +1,27 @@
 package com.booxware.retail.service.bus;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
+import java.util.concurrent.Callable;
+
+import javax.annotation.PostConstruct;
 
 import org.apache.commons.jxpath.JXPathContext;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.EnableCaching;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Profile;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -27,8 +31,6 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.google.common.cache.CacheBuilderSpec;
-
 
 /*
  * server sent event example
@@ -63,6 +65,7 @@ import com.google.common.cache.CacheBuilderSpec;
 @SpringBootApplication
 @RestController
 @EnableCaching
+@DependsOn("cacheManager")
 public class ProgramDataBusApplication {
 
 	private static final int CACHE_CAPACITY = 100;
@@ -73,49 +76,54 @@ public class ProgramDataBusApplication {
 		SpringApplication.run(ProgramDataBusApplication.class, args);
 	}
 
-	@Bean
-	@Profile("guava")
-	CacheBuilderSpec cacheBuilderSpec() {
-		return CacheBuilderSpec.parse("maximumSize=100,expireAfterAccess=1000");
+	// @Bean
+	// @Profile("guava")
+	// CacheBuilderSpec cacheBuilderSpec() {
+	// return CacheBuilderSpec
+	// .parse(String.format("maximumSize=?,expireAfterAccess=?", CACHE_CAPACITY,
+	// CACHE_TIMEOUT));
+	// }
+	//
+	@Autowired
+	CacheManager cacheManager;
+
+	ListableCache eventsCache;
+	Map<SseEmitter, String> subscribersAndFilters;
+
+	@PostConstruct
+	public void setup() {
+		this.eventsCache = ListableCache.build(cacheManager.getCache("events"));
+		this.subscribersAndFilters = new HashMap<>();
 	}
 
-	Cache events; 
-	List<String> activeEvents;
-	
-	Map<SseEmitter,String> subscribersWithFilters;
-
-	public ProgramDataBusApplication(CacheManager cacheManager) {
-		this.events=cacheManager.getCache("events");
-		this.activeEvents=new ArrayList<>();
-		this.subscribersWithFilters = new HashMap<>();
-	}
-	
 	@GetMapping(path = "/events", produces = "text/event-stream")
-	public SseEmitter subscribe(@RequestParam(name="query",defaultValue="")String xpath) {
-		
+	public SseEmitter subscribe(@RequestParam(name = "query", defaultValue = "") String xpath) {
+
 		SseEmitter emitter = new SseEmitter();
-		sendEventsFiltered(emitter, activeEvents, xpath);
-		
-		subscribersWithFilters.put(emitter,xpath);
-		Runnable remove=() -> {subscribersWithFilters.remove(emitter);};
+		filterAndSend(emitter, eventsCache.keys(), xpath);
+
+		subscribersAndFilters.put(emitter, xpath);
+		Runnable remove = () -> {
+			subscribersAndFilters.remove(emitter);
+		};
 		emitter.onCompletion(remove);
 		emitter.onTimeout(remove);
 		return emitter;
 	}
 
-	private void sendEventsFiltered(SseEmitter emitter, Collection<String> events, String xpath) {
+	private void filterAndSend(SseEmitter emitter, Collection<?> events, String xpath) {
 		Iterator<?> iterator;
-		if(xpath.isEmpty()){
-			iterator=events.iterator();
-		}else{
-			JXPathContext context=JXPathContext.newContext(events);
-			iterator=context.iterate(xpath);
+		if (xpath.isEmpty()) {
+			iterator = events.iterator();
+		} else {
+			JXPathContext context = JXPathContext.newContext(events);
+			iterator = context.iterate(xpath);
 		}
-		iterator.forEachRemaining(event->{
+		iterator.forEachRemaining(event -> {
 			try {
 				emitter.send(SseEmitter.event().data(event));
 			} catch (IOException e) {
-				activeEvents.remove(event.toString());
+				events.remove(event);
 			}
 		});
 	}
@@ -125,24 +133,98 @@ public class ProgramDataBusApplication {
 		sendToSubscribers(event);
 	}
 
-	@PostMapping(path = "/events", consumes={"application/x-www-form-urlencoded;charset=UTF-8", "application/json"})
+	@PostMapping(path = "/events", consumes = { "application/x-www-form-urlencoded;charset=UTF-8", "application/json" })
 	public void publish(@RequestBody JsonNode event) throws IOException {
 		sendToSubscribers(event);
 	}
 
 	private void sendToSubscribers(Object event) {
-		events.put(event.toString(), event);
-		activeEvents.add(event.toString());
+		eventsCache.put(event.toString(), event);
 
-		List<String> eventList = Arrays.asList(event.toString());
-		for (Entry<SseEmitter,String> entry : subscribersWithFilters.entrySet()) {
-			SseEmitter emitter=entry.getKey();
-			String xPathFilter=entry.getValue();
+		List<?> eventList = Arrays.asList(event);
+		for (Entry<SseEmitter, String> entry : subscribersAndFilters.entrySet()) {
+			SseEmitter emitter = entry.getKey();
+			String filter = entry.getValue();
 			try {
-				sendEventsFiltered(emitter, eventList, xPathFilter);
+				filterAndSend(emitter, eventList, filter);
 			} catch (IllegalStateException ex) {
 				emitter.completeWithError(ex);
 			}
 		}
 	}
+}
+
+class ListableCache implements Cache {
+	private final Set<Object> keys;
+	private final Cache cache;
+
+	public static ListableCache build(Cache cache) {
+		return new ListableCache(cache);
+	}
+
+	private ListableCache(Cache cache) {
+		this.cache = cache;
+		keys = new HashSet<>();
+	}
+
+	public Set<Object> keys() {
+		return keys;
+	}
+
+	@Override
+	public void clear() {
+		cache.clear();
+		keys.clear();
+	}
+
+	@Override
+	public void evict(Object arg0) {
+		cache.evict(arg0);
+		keys.remove(arg0);
+	}
+
+	@Override
+	public <T> T get(Object arg0, Callable<T> arg1) {
+		keys.add(arg0);
+		return cache.get(arg0, arg1);
+	}
+
+	@Override
+	public <T> T get(Object arg0, Class<T> arg1) {
+		keys.add(arg0);
+		return cache.get(arg0, arg1);
+	}
+
+	@Override
+	public ValueWrapper get(Object arg0) {
+		keys.add(arg0);
+		ValueWrapper result = get(arg0);
+		if (result == null) {
+			keys.remove(arg0);
+		}
+		return result;
+	}
+
+	@Override
+	public void put(Object arg0, Object arg1) {
+		keys.add(arg0);
+		cache.put(arg0, arg1);
+	}
+
+	@Override
+	public ValueWrapper putIfAbsent(Object arg0, Object arg1) {
+		keys.add(arg0);
+		return cache.putIfAbsent(arg0, arg1);
+	}
+
+	@Override
+	public String getName() {
+		return cache.getName();
+	}
+
+	@Override
+	public Object getNativeCache() {
+		return cache.getNativeCache();
+	}
+
 }
