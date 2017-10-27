@@ -1,11 +1,16 @@
 server sent event example
 =========================
 
+Prerequisite: have redis-server running
+
+Steps:
+
 1) package to <jar>
 
 2) run microservice:
 
-	java -jar <jar>
+	java -jar <jar> [-Devent.cache.expire=10]
+	Note: cache entry expiration in seconds. default 10s 
 
 3) run emitter:
 
@@ -14,14 +19,16 @@ server sent event example
 	
 	or long running - 
 		for i in {1..100000}; do \
-			msg=PID:$$-TIME:`date +%s`;
-			sleep 1;
-			echo $msg; 
-			curl -X POST localhost:8080/events/$msg; 
+			msg=PID:$$-TIME:`date +%x-%X|sed 's/[\/,:, ]/-/g'`; \
+			sleep 1; \
+			echo $msg; \ 
+			curl -X POST localhost:8080/events/$msg; \ 
 		done;
 	
 4) run listener:
 
 	browser - <host>:<port>/sse.html
 	
-	or curl -H'accept: text/event-stream' <host>:<port>/events	
+	or curl -H'accept: text/event-stream' <host>:<port>/events
+	
+	example optional query: //*[contains(local-name(),'Name')]	
